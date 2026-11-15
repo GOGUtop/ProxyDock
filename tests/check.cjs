@@ -10,9 +10,11 @@ const originAgents=[http.globalAgent,https.globalAgent];
 const backupEnv={all_proxy:process.env.all_proxy,ALL_PROXY:process.env.ALL_PROXY,HTTP_PROXY:process.env.HTTP_PROXY,NO_PROXY:process.env.NO_PROXY};
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'pd-test-'));
 fs.copyFileSync(path.join(__dirname,'../index.cjs'),path.join(tmp,'index.cjs'));
+fs.copyFileSync(path.join(__dirname,'../core-manager.cjs'),path.join(tmp,'core-manager.cjs'));
 const originalLoad=Module._load;
 class FakeAgent {constructor(opts){this.opts=opts;this.destroyed=false;}destroy(){this.destroyed=true;}}
 Module._load=function(name,parent,main){
+    if(name==='yaml')return {parse:JSON.parse,stringify:JSON.stringify};
     if(name==='express')return {json:()=>function mockedJson(){}};
     if(name==='proxy-agent')return {ProxyAgent:FakeAgent};
     return originalLoad.call(this,name,parent,main);
@@ -20,6 +22,18 @@ Module._load=function(name,parent,main){
 const plugin=require(path.join(tmp,'index.cjs'));
 Module._load=originalLoad;
 const {validUrl,redact,bypassHost,proxyForUrl,cleanBypass}=plugin.__testing;
+const core=require(path.join(tmp,'core-manager.cjs'));
+assert.equal(core.safeSubscriptionUrl('https://example.com/sub?a=abc'),'https://example.com/sub?a=abc');
+assert.throws(()=>core.safeSubscriptionUrl('http://example.com/sub'));
+assert.throws(()=>core.safeSubscriptionUrl('https://127.0.0.1/'));
+assert.equal(core.safePublicIP('127.0.0.1'),false);
+assert.equal(core.safePublicIP('8.8.8.8'),true);
+const config=core.parseSubscription(JSON.stringify({proxies:[{name:'HK1',type:'ss'}]}),'abc');
+const conf=JSON.parse(config.text);
+assert.equal(conf['mixed-port'],17890);
+assert.equal(conf['external-controller'],'127.0.0.1:19097');
+assert.deepEqual(conf.rules,['MATCH,ProxyDock']);
+assert.equal(conf.tun.enable,false);
 assert.equal(validUrl('socks5://127.0.0.1:7891'),'socks5://127.0.0.1:7891');
 assert.match(redact('http://alice:secret@host.local:8080'),/\*\*\*/);
 assert(!redact('http://alice:secret@host.local:8080').includes('secret'));
@@ -46,12 +60,15 @@ async function call(method,route,body={},token=''){
 (async()=>{
     // mock dependencies for init which are loaded lazily
     Module._load=function(name,parent,main){
-        if(name==='express')return {json:()=>function mockedJson(){}};
+        if(name==='yaml')return {parse:JSON.parse,stringify:JSON.stringify};
+    if(name==='express')return {json:()=>function mockedJson(){}};
         if(name==='proxy-agent')return {ProxyAgent:FakeAgent};
         return originalLoad.call(this,name,parent,main);
     };
     await plugin.init(router);Module._load=originalLoad;
     assert.equal(routes.has('GET /health'),true);
+    assert.equal(routes.has('POST /subscriptions'),true);
+    assert.equal(routes.has('POST /core/start'),true);
     assert.equal((await call('GET','/health')).body.ok,true);
     assert.equal((await call('GET','/status')).code,401);
     const token=fs.readFileSync(path.join(tmp,'auth-token.txt'),'utf8').trim();
@@ -71,5 +88,5 @@ async function call(method,route,body={},token=''){
     await plugin.exit();
     for(const [key,val]of Object.entries(backupEnv)){if(val===undefined)delete process.env[key];else process.env[key]=val;}
     fs.rmSync(tmp,{recursive:true,force:true});
-    console.log('ProxyDock tests passed: 18 checks (validation, auth, add, switch, disable, env).');
+    console.log('ProxyDock Plus tests passed: validation, auth, subscription safety, Mihomo config, proxy switching.');
 })().catch(e=>{Module._load=originalLoad;http.globalAgent=originAgents[0];https.globalAgent=originAgents[1];console.error(e);process.exitCode=1;});

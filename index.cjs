@@ -1,10 +1,11 @@
 'use strict';
-/** ProxyDock v1.0.0. Runs INSIDE the SillyTavern Node.js process. */
+/** ProxyDock Plus v2.0.0. Runs INSIDE the SillyTavern Node.js process. */
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const http = require('node:http');
 const https = require('node:https');
+const core = require('./core-manager.cjs');
 
 const HOME = __dirname;
 const STATE_FILE = path.join(HOME, 'state.json');
@@ -13,7 +14,7 @@ const ENDPOINT = 'https://api.ipify.org?format=json';
 const initialAgents = { http: http.globalAgent, https: https.globalAgent };
 const envNames = ['all_proxy','ALL_PROXY','http_proxy','HTTP_PROXY','https_proxy','HTTPS_PROXY','no_proxy','NO_PROXY'];
 const initialEnv = Object.fromEntries(envNames.map(k => [k, process.env[k]]));
-const DEFAULT = () => ({enabled:false, profiles:[], activeId:null, bypass:['localhost','127.0.0.1','::1'], controller:{port:9097,secret:''}});
+const DEFAULT = () => ({enabled:false, profiles:[], activeId:null, bypass:['localhost','127.0.0.1','::1'], controller:{port:9097,secret:''}, subscriptions:[], activeSubscriptionId:null, binary:'mihomo', managedSecret:''});
 let state = DEFAULT();
 let authToken = '';
 let currentAgent = null;
@@ -51,8 +52,13 @@ function load() {
         cleaned.bypass = cleanBypass(read.bypass || cleaned.bypass);
         if (Number.isInteger(read.controller?.port) && read.controller.port >=1 && read.controller.port <=65535) cleaned.controller.port=read.controller.port;
         if (typeof read.controller?.secret === 'string') cleaned.controller.secret=read.controller.secret.slice(0,512);
+        cleaned.subscriptions = Array.isArray(read.subscriptions) ? read.subscriptions.slice(0,30).filter(s => typeof s.id==='string' && /^[a-f0-9-]{36}$/.test(s.id) && typeof s.name==='string' && typeof s.url==='string').map(s=>({id:s.id,name:s.name.slice(0,80),url:core.safeSubscriptionUrl(s.url),updatedAt:typeof s.updatedAt==='string'?s.updatedAt:null})) : [];
+        cleaned.activeSubscriptionId=cleaned.subscriptions.some(s=>s.id===read.activeSubscriptionId)?read.activeSubscriptionId:null;
+        cleaned.binary=typeof read.binary==='string'?read.binary.slice(0,300):'mihomo';
+        cleaned.managedSecret=typeof read.managedSecret==='string'&&/^[a-f0-9]{64}$/.test(read.managedSecret)?read.managedSecret:crypto.randomBytes(32).toString('hex');
         state=cleaned;
     } catch (error) { if (error.code !== 'ENOENT') console.error('[ProxyDock] 配置读取失败:', error.message); }
+    if (!state.managedSecret) {state.managedSecret=crypto.randomBytes(32).toString('hex');save();}
     if (fs.existsSync(TOKEN_FILE)) authToken = fs.readFileSync(TOKEN_FILE,'utf8').trim();
     if (!/^[a-f0-9]{64}$/.test(authToken)) {
         authToken = crypto.randomBytes(32).toString('hex');
@@ -100,7 +106,10 @@ function apply() {
     currentAgent=agent;
 }
 function visible() {
-    return {enabled:state.enabled, activeId:state.activeId, profiles:state.profiles.map(p=>({id:p.id,name:p.name,url:redact(p.url)})), bypass:state.bypass, controller:{port:state.controller.port,hasSecret:!!state.controller.secret}, scope:'SillyTavern Node HTTP/HTTPS global agents; browser traffic and undici/fetch may use other networking paths'};
+    return {enabled:state.enabled, activeId:state.activeId, profiles:state.profiles.map(p=>({id:p.id,name:p.name,url:redact(p.url)})), bypass:state.bypass, controller:{port:state.controller.port,hasSecret:!!state.controller.secret},
+       core:core.status(),binary:state.binary,activeSubscriptionId:state.activeSubscriptionId,
+       subscriptions:state.subscriptions.map(s=>({id:s.id,name:s.name,updatedAt:s.updatedAt,host:new URL(s.url).host})),
+       scope:'Node global HTTP/HTTPS agents and env only; Undici/fetch and other independent networking paths may not be proxied'};
 }
 function checkToken(req,res,next) {
     const given=req.get('X-ProxyDock-Token')||'';
@@ -128,9 +137,10 @@ function mihomo(method, route, payload=null) {
     return new Promise((resolve,reject)=>{
         const json=payload===null ? null : JSON.stringify(payload);
         const headers={'Accept':'application/json'};
-        if(state.controller.secret)headers.Authorization=`Bearer ${state.controller.secret}`;
+        const ctrlSecret=core.status().running?state.managedSecret:state.controller.secret;
+        if(ctrlSecret)headers.Authorization=`Bearer ${ctrlSecret}`;
         if(json){headers['Content-Type']='application/json';headers['Content-Length']=Buffer.byteLength(json);}
-        const req=http.request({hostname:'127.0.0.1',port:state.controller.port,method,path:route,headers,timeout:5000,agent:initialAgents.http},res=>{
+        const req=http.request({hostname:'127.0.0.1',port:core.status().running?core.LOOPBACK_API_PORT:state.controller.port,method,path:route,headers,timeout:5000,agent:initialAgents.http},res=>{
             let body=''; res.setEncoding('utf8');
             res.on('data',c=>{body+=c; if(body.length>1048576)req.destroy(new Error('控制器响应过大'));});
             res.on('end',()=> {let obj={};try{obj=body?JSON.parse(body):{};}catch{obj={message:body.slice(0,120)};}
@@ -149,7 +159,7 @@ async function init(router) {
     load();
     if(state.enabled)apply();
     router.use(require('express').json({limit:'16kb'}));
-    router.get('/health',(_,res)=>res.json({ok:true,name:'ProxyDock',version:'1.0.0'}));
+    router.get('/health',(_,res)=>res.json({ok:true,name:'ProxyDock',version:'2.0.0'}));
     router.use(checkToken);
     router.get('/status',wrap((_,res)=>res.json(visible())));
     router.post('/profiles',wrap((req,res)=>{
@@ -212,9 +222,91 @@ async function init(router) {
         const route='/proxies/'+encodeURIComponent(name)+'/delay?url='+encodeURIComponent('https://www.gstatic.com/generate_204')+'&timeout=8000';
         res.json(await mihomo('GET',route));
     }));
+
+    // SUBSCRIPTIONS: download only over HTTPS with strict public-DNS checks.
+    const subsDir=path.join(HOME,'runtime','subscriptions');
+    const subFile=id=>path.join(subsDir,id+'.yaml');
+    const subById=id=>{const sub=state.subscriptions.find(s=>s.id===id);if(!sub)throw new Error('订阅不存在');return sub;};
+    const fetchAndStore=async (sub)=>{
+        const content=await core.fetchOnce(sub.url);
+        const summary=core.parseSubscription(content,state.managedSecret);
+        fs.mkdirSync(subsDir,{recursive:true,mode:0o700});
+        fs.writeFileSync(subFile(sub.id),content,{mode:0o600});
+        sub.updatedAt=new Date().toISOString();
+        save();return summary;
+    };
+    router.post('/subscriptions',wrap(async(req,res)=>{
+        const name=req.body?.name,raw=req.body?.url;
+        if(typeof name!=='string'||!name.trim()||name.length>80)throw new Error('订阅名称长度需为 1–80');
+        if(state.subscriptions.length>=30)throw new Error('最多 30 个订阅');
+        const url=core.safeSubscriptionUrl(raw);
+        const sub={id:crypto.randomUUID(),name:name.trim(),url,updatedAt:null};
+        const summary=await fetchAndStore(sub);
+        state.subscriptions.push(sub);
+        if(!state.activeSubscriptionId)state.activeSubscriptionId=sub.id;
+        save();res.json({...visible(),summary});
+    }));
+    router.post('/subscriptions/refresh',wrap(async(req,res)=>{
+        const sub=subById(req.body?.id);const summary=await fetchAndStore(sub);
+        const needsRestart=core.status().running && sub.id===state.activeSubscriptionId;
+        if(needsRestart){await core.stop();await core.writeConfig(fs.readFileSync(subFile(sub.id),'utf8'),state.managedSecret);await core.start(state.binary);}
+        res.json({...visible(),summary});
+    }));
+    router.post('/subscriptions/select',wrap(async(req,res)=>{
+        const sub=subById(req.body?.id);
+        if(core.status().running){
+            await core.stop();await core.writeConfig(fs.readFileSync(subFile(sub.id),'utf8'),state.managedSecret);
+            await core.start(state.binary);
+        }
+        state.activeSubscriptionId=sub.id;save();res.json(visible());
+    }));
+    router.post('/subscriptions/delete',wrap((req,res)=>{
+        const sub=subById(req.body?.id);
+        if(core.status().running && sub.id===state.activeSubscriptionId)throw new Error('请先停止 Mihomo 再删除当前订阅');
+        state.subscriptions=state.subscriptions.filter(s=>s.id!==sub.id);
+        if(state.activeSubscriptionId===sub.id)state.activeSubscriptionId=state.subscriptions[0]?.id||null;
+        try{fs.unlinkSync(subFile(sub.id));}catch{}
+        save();res.json(visible());
+    }));
+    router.post('/core/binary',wrap(async(req,res)=>{
+        const name=req.body?.binary;
+        if(typeof name!=='string'||!name.trim()||name.length>300)throw new Error('Mihomo 路径无效');
+        if(core.status().running)throw new Error('请先停止核心再更改可执行文件');
+        const version=await core.checkBinary(name.trim());
+        state.binary=name.trim();save();res.json({...visible(),version});
+    }));
+    router.post('/core/check',wrap(async(_,res)=>{
+        const version=await core.checkBinary(state.binary);
+        res.json({ok:true,version});
+    }));
+    router.post('/core/start',wrap(async(_,res)=>{
+        if(!state.activeSubscriptionId)throw new Error('请先导入并选择订阅');
+        const sub=subById(state.activeSubscriptionId);
+        const raw=fs.readFileSync(subFile(sub.id),'utf8');
+        const summary=await core.writeConfig(raw,state.managedSecret);
+        await core.start(state.binary);
+        const internalUrl='http://127.0.0.1:'+core.LOOPBACK_PROXY_PORT;
+        if(!state.profiles.some(p=>p.id==='managed-core'))state.profiles.push({id:'managed-core',name:'内置 Mihomo（ProxyDock）',url:internalUrl});
+        // Do not silently turn on proxy; user must test and explicitly enable.
+        save();res.json({...visible(),summary});
+    }));
+    router.post('/core/stop',wrap(async(_,res)=>{
+        if(state.activeId==='managed-core' && state.enabled){state.enabled=false;apply();}
+        await core.stop();save();res.json(visible());
+    }));
+    router.post('/core/mode',wrap(async(req,res)=>{
+        if(!core.status().running)throw new Error('请先启动 Mihomo');
+        const mode=req.body?.mode;
+        if(!['rule','global','direct'].includes(mode))throw new Error('无效的代理模式');
+        await mihomo('PATCH','/configs',{mode});res.json({ok:true,mode});
+    }));
+    router.get('/core/config',wrap(async(_,res)=>{
+        if(!core.status().running)return res.json({mode:null});
+        const conf=await mihomo('GET','/configs');res.json({mode:conf.mode||null});
+    }));
     console.log('[ProxyDock] 已加载 | 管理密钥文件：' + TOKEN_FILE);
 }
-async function exit() { state.enabled=false;apply(); }
-module.exports={init,exit,info:{id:'proxy-dock',name:'ProxyDock',description:'管理 SillyTavern 出站代理并连接本地 Mihomo 控制器'},
+async function exit() { state.enabled=false;apply();await core.stop(); }
+module.exports={init,exit,info:{id:'proxy-dock',name:'ProxyDock',description:'SillyTavern 代理/订阅管理与本地 Mihomo 核心控制'},
   // Exposed only for automated, non-network unit tests.
   __testing:{validUrl,redact,bypassHost,proxyForUrl,cleanBypass}};
