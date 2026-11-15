@@ -1,10 +1,12 @@
 import { getRequestHeaders } from '../../../../script.js';
+import { createImageBridge } from './image-bridge.js';
 
 // All DOM IDs are private to ProxyDock; no user-controlled HTML is interpolated.
 const API = '/api/plugins/proxy-dock';
 let token = '';
 let status = null;
 let groups = [];
+const imageBridge=createImageBridge({api:(...args)=>api(...args),onError:e=>notify('图片自动代理失败：'+(e?.message||String(e)),'error')});
 const $ = selector => document.querySelector(selector);
 const el = (tag, text, className='') => { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(className)node.className=className; return node; };
 
@@ -22,7 +24,7 @@ async function api(route, payload=null) {
     return data;
 }
 async function exec(fn, success='') { try {await fn();if(success)notify(success,'ok');}catch(e){notify(e.message||String(e),'error');} }
-function setStatus(data) {status=data;render();}
+function setStatus(data) {status=data;render();imageBridge.setEnabled(Boolean(status.images?.enabled));}
 async function refresh() {setStatus(await api('/status'));}
 function render() {
     $('#pd-locked').hidden=true;$('#pd-body').hidden=false;
@@ -36,6 +38,8 @@ function render() {
     $('#pd-delete').disabled=!status.activeId;
     $('#pd-test').disabled=!status.activeId;
     $('#pd-enable').disabled=!status.profiles.length;
+    $('#pd-images-enable').checked=Boolean(status.images?.enabled);
+    $('#pd-images-state').textContent=!status.images?.enabled?'未启用（浏览器直接访问图片源站）':('已启用 · '+(status.images.mode||'服务器直连')+' · 缓存 '+(status.images.cacheCount||0)+' 张');
     const subs=$('#pd-subscriptions');subs.replaceChildren();
     if(!status.subscriptions?.length)subs.add(new Option('尚未添加订阅',''));
     for(const sub of status.subscriptions||[])subs.add(new Option(sub.name+(sub.updatedAt?' · '+new Date(sub.updatedAt).toLocaleString():''),sub.id));
@@ -93,6 +97,13 @@ function init() {
             <label>当前订阅<select id="pd-subscriptions"></select></label>
             <div class="pd-actions"><button id="pd-sub-use" type="button">选用订阅</button><button id="pd-sub-refresh" type="button">更新订阅</button><button id="pd-sub-del" type="button" class="pd-danger">删除订阅</button></div>
           </div>
+          <div class="pd-section"><div class="pd-line"><h3>Catbox 图片代理 · 手机免梯子加载</h3><label class="pd-toggle"><input type="checkbox" id="pd-images-enable"><span>启用</span></label></div>
+            <p class="pd-help">开启后自动将酒馆页面中 files.catbox.moe、litter.catbox.moe 的图片改由酒馆服务器下载。若酒馆代理已经开启，则使用所选 Mihomo/代理节点；否则尝试服务器直连。不支持失效的图片链接。每次刷新页面，需先输入管理员令牌连接插件，才会自动替换图片。</p>
+            <div id="pd-images-state" class="pd-state">未启用</div>
+            <label>测试图片地址（填写一条真实的 Catbox 图片直链）<input id="pd-image-test-url" type="url" placeholder="https://files.catbox.moe/xxxxxx.png" autocomplete="off" /></label>
+            <div class="pd-actions"><button id="pd-image-test" type="button">测试服务器图片下载</button><button id="pd-image-rescan" type="button">重新加载聊天图片</button></div>
+            <p class="pd-help">安全限制：只允许 Catbox 指定图片域名及格式；12 MiB/张，带签名的临时链接，缓存 10 分钟。SVG、视频、音频及其他任意网址均不会代理。</p>
+          </div>
           <div class="pd-section"><h3>内置 Mihomo 核心 · Linux</h3>
             <p class="pd-help">需要先在酒馆服务器上安装官方 Mihomo 可执行程序。这里管理酒馆服务器的独立核心，不会开启系统 TUN。HTTP 混合端口 17890，管理 API 19097，均仅监听 127.0.0.1。</p>
             <label>Mihomo 可执行文件<input id="pd-binary" placeholder="mihomo 或 /usr/local/bin/mihomo" /></label>
@@ -127,7 +138,7 @@ function init() {
             <label>节点<select id="pd-nodes"></select></label>
             <div class="pd-actions"><button id="pd-switch-node" type="button" class="pd-primary">切换节点</button><button id="pd-node-delay" type="button">测试节点延迟</button></div>
           </div>
-          <p class="pd-foot">作用于酒馆的 Node.js 出站 HTTP/HTTPS 全局代理及部分遵守代理环境变量的库；不会代理浏览器、操作系统全局流量，某些 fetch / 独立代理客户端不受影响。切换前请先完成正在进行的生成请求。</p>
+          <p class="pd-foot">节点代理作用于酒馆 Node.js 出站 HTTP/HTTPS；Catbox 图片可通过本插件的独立图片转发功能由服务器代理加载，但不会代理浏览器其他网站或操作系统全局流量，某些 fetch / 独立代理客户端不受影响。切换前请先完成正在进行的生成请求。</p>
         </div>
       </div>
     </section></div>`;
@@ -144,6 +155,20 @@ function init() {
         await refresh();$('#pd-token').value='';notify('管理器已连接','ok');
     }));
     $('#pd-refresh').addEventListener('click',()=>exec(refresh,'已更新'));
+    $('#pd-images-enable').addEventListener('change',()=>exec(async()=>{
+        setStatus(await api('/images/settings',{enabled:$('#pd-images-enable').checked}));
+        notify(status.images.enabled?'Catbox 图片代理已开启，正在替换页面中的图片':'Catbox 图片代理已关闭，已恢复浏览器原始图片地址','ok');
+    }));
+    $('#pd-image-test').addEventListener('click',()=>exec(async()=>{
+        const url=$('#pd-image-test-url').value.trim();if(!url)throw new Error('请填写一条 Catbox 图片直链');
+        notify('正在通过酒馆服务器下载图片…');
+        const result=await api('/images/test',{url});
+        notify('下载成功！'+result.mode+' · '+result.mime+' · '+Math.ceil(result.size/1024)+' KiB'+(result.cacheHit?'（已缓存）':''),'ok');
+    }));
+    $('#pd-image-rescan').addEventListener('click',()=>exec(async()=>{
+        if(!imageBridge.isEnabled())throw new Error('请先开启 Catbox 图片代理');
+        await imageBridge.scan(true);
+    },'已重新签发并刷新页面中的 Catbox 图片'));
     $('#pd-sub-add').addEventListener('click',()=>exec(async()=>{
         const name=$('#pd-sub-name').value.trim(),url=$('#pd-sub-url').value.trim();
         if(!name||!url)throw new Error('请填写名称和 Clash YAML 订阅地址');

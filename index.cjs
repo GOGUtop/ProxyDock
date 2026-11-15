@@ -1,11 +1,12 @@
 'use strict';
-/** ProxyDock Plus v2.0.1. Runs INSIDE the SillyTavern Node.js process. */
+/** ProxyDock Plus v2.1.0. Runs INSIDE the SillyTavern Node.js process. */
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const http = require('node:http');
 const https = require('node:https');
 const core = require('./core-manager.cjs');
+const {createImageProxy}=require('./image-proxy.cjs');
 
 const HOME = __dirname;
 const STATE_FILE = path.join(HOME, 'state.json');
@@ -14,11 +15,12 @@ const ENDPOINT = 'https://api.ipify.org?format=json';
 const initialAgents = { http: http.globalAgent, https: https.globalAgent };
 const envNames = ['all_proxy','ALL_PROXY','http_proxy','HTTP_PROXY','https_proxy','HTTPS_PROXY','no_proxy','NO_PROXY'];
 const initialEnv = Object.fromEntries(envNames.map(k => [k, process.env[k]]));
-const DEFAULT = () => ({enabled:false, profiles:[], activeId:null, bypass:['localhost','127.0.0.1','::1'], controller:{port:9097,secret:''}, subscriptions:[], activeSubscriptionId:null, binary:'mihomo', managedSecret:''});
+const DEFAULT = () => ({enabled:false, profiles:[], activeId:null, bypass:['localhost','127.0.0.1','::1'], controller:{port:9097,secret:''}, subscriptions:[], activeSubscriptionId:null, binary:'mihomo', managedSecret:'', images:{enabled:false}});
 let state = DEFAULT();
 let authToken = '';
 let currentAgent = null;
 let ProxyAgentClass = null;
+let imageRelay=null;
 
 function validUrl(raw) {
     if (typeof raw !== 'string' || raw.length > 2048) throw new Error('代理地址格式或长度不正确');
@@ -55,6 +57,7 @@ function load() {
         cleaned.subscriptions = Array.isArray(read.subscriptions) ? read.subscriptions.slice(0,30).filter(s => typeof s.id==='string' && /^[a-f0-9-]{36}$/.test(s.id) && typeof s.name==='string' && typeof s.url==='string').map(s=>({id:s.id,name:s.name.slice(0,80),url:core.safeSubscriptionUrl(s.url),updatedAt:typeof s.updatedAt==='string'?s.updatedAt:null})) : [];
         cleaned.activeSubscriptionId=cleaned.subscriptions.some(s=>s.id===read.activeSubscriptionId)?read.activeSubscriptionId:null;
         cleaned.binary=typeof read.binary==='string'?read.binary.slice(0,300):'mihomo';
+        cleaned.images={enabled:read.images?.enabled===true};
         cleaned.managedSecret=typeof read.managedSecret==='string'&&/^[a-f0-9]{64}$/.test(read.managedSecret)?read.managedSecret:crypto.randomBytes(32).toString('hex');
         state=cleaned;
     } catch (error) { if (error.code !== 'ENOENT') console.error('[ProxyDock] 配置读取失败:', error.message); }
@@ -109,6 +112,7 @@ function visible() {
     return {enabled:state.enabled, activeId:state.activeId, profiles:state.profiles.map(p=>({id:p.id,name:p.name,url:redact(p.url)})), bypass:state.bypass, controller:{port:state.controller.port,hasSecret:!!state.controller.secret},
        core:core.status(),binary:state.binary,activeSubscriptionId:state.activeSubscriptionId,
        subscriptions:state.subscriptions.map(s=>({id:s.id,name:s.name,updatedAt:s.updatedAt,host:new URL(s.url).host})),
+       images:{enabled:state.images.enabled,proxyEnabled:state.enabled,mode:state.enabled?'已选酒馆代理':'服务器直连',...imageRelay?.stats()},
        scope:'Node global HTTP/HTTPS agents and env only; Undici/fetch and other independent networking paths may not be proxied'};
 }
 function checkToken(req,res,next) {
@@ -158,9 +162,42 @@ async function init(router) {
     if (typeof ProxyAgentClass!=='function')throw new Error('proxy-agent 不可用');
     load();
     if(state.enabled)apply();
+    imageRelay=createImageProxy({
+        secret:()=>authToken,
+        getSettings:()=>state.images,
+        getProxyUrl:()=>{
+            if(!state.enabled)return '';
+            const selected=state.profiles.find(p=>p.id===state.activeId);
+            if(!selected)throw new Error('当前代理配置不存在');
+            if(selected.id==='managed-core'&&!core.status().running)throw new Error('内置 Mihomo 尚未运行，请先启动核心');
+            return selected.url;
+        },
+        ProxyAgentClass:()=>ProxyAgentClass,
+    });
     router.use(require('express').json({limit:'16kb'}));
-    router.get('/health',(_,res)=>res.json({ok:true,name:'ProxyDock',version:'2.0.1'}));
+    router.get('/health',(_,res)=>res.json({ok:true,name:'ProxyDock',version:'2.1.0'}));
+    // Browser <img> cannot set admin headers. Require a time-limited HMAC-signed
+    // image URL minted only through the authenticated /images/sign endpoint.
+    router.get('/images/proxy', (req,res)=>imageRelay.serve(req,res));
     router.use(checkToken);
+    router.post('/images/settings',wrap((req,res)=>{
+        if(typeof req.body?.enabled!=='boolean')throw new Error('enabled 必须是布尔值');
+        state.images.enabled=req.body.enabled;
+        if(!state.images.enabled)imageRelay.clearCache();
+        save();res.json(visible());
+    }));
+    router.post('/images/sign',wrap((req,res)=>{
+        if(!state.images.enabled)throw new Error('图片代理尚未启用');
+        const urls=req.body?.urls;
+        if(!Array.isArray(urls)||urls.length<1||urls.length>80)throw new Error('每次仅能签发 1–80 个图片链接');
+        if(urls.some(u=>typeof u!=='string'))throw new Error('图片链接无效');
+        res.json({images:urls.map(url=>imageRelay.sign(url))});
+    }));
+    router.post('/images/test',wrap(async(req,res)=>{
+        if(!state.images.enabled)throw new Error('请先启用 Catbox 图片代理');
+        const image=await imageRelay.getImage(req.body?.url);
+        res.json({ok:true,size:image.data.length,mime:image.mime,cacheHit:image.cacheHit,mode:state.enabled?'已选酒馆代理':'服务器直连'});
+    }));
     router.get('/status',wrap((_,res)=>res.json(visible())));
     router.post('/profiles',wrap((req,res)=>{
         const {name,url}=req.body||{};
@@ -307,6 +344,6 @@ async function init(router) {
     console.log('[ProxyDock] 已加载 | 管理密钥文件：' + TOKEN_FILE);
 }
 async function exit() { state.enabled=false;apply();await core.stop(); }
-module.exports={init,exit,info:{id:'proxy-dock',name:'ProxyDock',description:'SillyTavern 代理/订阅管理与本地 Mihomo 核心控制'},
+module.exports={init,exit,info:{id:'proxy-dock',name:'ProxyDock',description:'SillyTavern 代理/订阅/Mihomo 管理及 Catbox 图片转发'},
   // Exposed only for automated, non-network unit tests.
   __testing:{validUrl,redact,bypassHost,proxyForUrl,cleanBypass}};

@@ -11,6 +11,7 @@ const backupEnv={all_proxy:process.env.all_proxy,ALL_PROXY:process.env.ALL_PROXY
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'pd-test-'));
 fs.copyFileSync(path.join(__dirname,'../index.cjs'),path.join(tmp,'index.cjs'));
 fs.copyFileSync(path.join(__dirname,'../core-manager.cjs'),path.join(tmp,'core-manager.cjs'));
+fs.copyFileSync(path.join(__dirname,'../image-proxy.cjs'),path.join(tmp,'image-proxy.cjs'));
 const originalLoad=Module._load;
 class FakeAgent {constructor(opts){this.opts=opts;this.destroyed=false;}destroy(){this.destroyed=true;}}
 Module._load=function(name,parent,main){
@@ -87,9 +88,22 @@ async function call(method,route,body={},token=''){
     assert.equal(routes.has('GET /health'),true);
     assert.equal(routes.has('POST /subscriptions'),true);
     assert.equal(routes.has('POST /core/start'),true);
+    assert.equal(routes.has('GET /images/proxy'),true);
+    assert.equal(routes.has('POST /images/sign'),true);
+    assert.equal(routes.has('POST /images/settings'),true);
     assert.equal((await call('GET','/health')).body.ok,true);
     assert.equal((await call('GET','/status')).code,401);
     const token=fs.readFileSync(path.join(tmp,'auth-token.txt'),'utf8').trim();
+    assert.equal((await call('GET','/status',{},token)).body.images.enabled,false);
+    let settings=await call('POST','/images/settings',{enabled:true},token);
+    assert.equal(settings.body.images.enabled,true);
+    let signer=await call('POST','/images/sign',{urls:['https://files.catbox.moe/abc123.png']},token);
+    assert.equal(signer.code,200);
+    assert.match(signer.body.images[0].url,/^\/api\/plugins\/proxy-dock\/images\/proxy\?/);
+    let denied=await call('POST','/images/sign',{urls:['https://127.0.0.1/private.png']},token);
+    assert.equal(denied.code,400);
+    settings=await call('POST','/images/settings',{enabled:false},token);
+    assert.equal(settings.body.images.enabled,false);
     let r=await call('POST','/profiles',{name:'Local Clash',url:'http://127.0.0.1:7890'},token);
     assert.equal(r.body.profiles.length,1);
     const id=r.body.profiles[0].id;

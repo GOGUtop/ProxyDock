@@ -1,6 +1,6 @@
-> v2.0.1 修复：Node.js 22/24 订阅导入时 `Invalid IP address: undefined`（DNS lookup 回调格式）。
+> v2.1.0 新增：Catbox 图片自动转发、10 分钟内存缓存、同源临时签名图片地址与开关。保留 v2.0.1 的 DNS 修复。
 
-# ProxyDock Plus v2.0.1 — SillyTavern 订阅代理管理器
+# ProxyDock Plus v2.1.0 — SillyTavern 订阅代理与 Catbox 图片管理器
 
 **目标：** 在 SillyTavern 酒馆网页内完成 Clash/Mihomo **YAML 订阅添加、更新、切换代理组和节点、延迟测试、代理模式切换，以及服务器端 Mihomo 代理核心启停**。本项目不是 Clash Verge Rev 的桌面程序，也没有复制 Clash Verge 的源码、界面或商标。
 
@@ -18,6 +18,9 @@
 | 规则 / 全局 / 直连 | ✅ 核心运行时切换 |
 | HTTP/SOCKS 自定义上游代理配置 | ✅ 保留 v1 功能 |
 | 让酒馆 Node.js 代理请求 | ✅ http/https global Agent、环境变量等部分网络路径 |
+| Catbox 聊天图片代理（`files.catbox.moe`、`litter.catbox.moe`） | ✅ 用户开启后自动替换网页图片直链 |
+| Catbox 图片测试、临时签名 URL、内存缓存 | ✅ 图片上限 12 MiB、缓存 10 分钟、签名 1 小时 |
+| 手机或浏览器其他网站的所有流量代理 | ❌ 不支持 |
 | 自动转换 Base64 节点、VLESS/VMess/SS 链接 | ❌ 不支持，需要服务商提供 Clash YAML 配置 |
 | 系统 TUN、桌面托盘、GUI、全局 VPN | ❌ 不支持 |
 | 强制代理所有 Node fetch/Undici 与浏览器流量 | ❌ 不保证 |
@@ -100,6 +103,35 @@ requestProxy:
 
 若插件启动后未自动启动 Mihomo、或端口未监听，启用上面配置可能导致酒馆启动后的外部请求失败，因此**请先在酒馆界面成功启动并测试 Mihomo 再调整**，并注意实际 `fetch` 覆盖范围也应单独验证。
 
+## v2.1 新增：Catbox 图片代理（建议先做这一步）
+
+**为何必须额外实现？** 酒馆页面里的图片 `<img src="https://files.catbox.moe/...">` 默认由访问酒馆的手机/电脑**直接**向 Catbox 请求；服务器端 Node.js 代理开关不会自动影响浏览器加载。新版通过酒馆服务器提供同源图片转发接口，允许手机在自身不使用 VPN 时获取**服务器可以访问到的** Catbox 图片。
+
+### 使用顺序
+
+1. **先确认节点可用：** 在 ProxyDock 中导入 Clash YAML 订阅，启动 Mihomo，选择可以访问 Catbox 的节点，点击「设为酒馆代理并开启」。若酒馆服务器本身能够直连 Catbox，也可仅开启图片代理进行测试。
+2. 在「Catbox 图片代理」一栏打开「启用」。请先连接管理员令牌，再打开开关。启用状态会保存在服务端 `state.json`，**但每次刷新网页仍需重新输入管理令牌**，以便为图片签发临时同源链接。
+3. 在「测试图片地址」粘贴**一条实际可用、不会含订阅令牌**的 Catbox 图片直链（如 `https://files.catbox.moe/xxxxxx.png`），点击「测试服务器图片下载」。检测通过后，再点击「重新加载聊天图片」。已有和后续添加的符合条件的 `<img>`、`<picture><source srcset>`、图片链接、`srcset` 及**行内 CSS** `background-image` 将尝试改由酒馆服务器加载。
+4. 在浏览器中打开聊天页面。如果仍有破图，先使用「测试服务器图片下载」查看具体错误，再检查图片 URL 是否确实指向所支持的 Catbox 域名、是否已经被源站删除。**仅安装代理插件无法修复 404/失效链接。**
+
+### 工作机制与安全
+
+- 前端扫描当前酒馆网页中**精确匹配** `files.catbox.moe` / `litter.catbox.moe` 的 HTTPS 图片 URL，不修改其他站点资源，也不修改保存的聊天原始文本。关闭开关时，恢复先前的 HTML 图片 URL。
+- 前端经带管理员令牌的接口申请 1 小时有效的签名地址；浏览器以 `<img>` 加载同源 `/api/plugins/proxy-dock/images/proxy`，无需把管理令牌附加到图片请求里。仅有签名、仍在有效期内、图片域名和文件名符合白名单的请求才能下载。
+- 服务器下载图片时，如果**已经开启酒馆代理**，使用选中的 HTTP/SOCKS5 或 Mihomo 节点；否则由酒馆服务器直连 Catbox。服务器直连时校验 DNS 解析结果，拒绝内网 IP；不支持任意网址转发、SVG/HTML、视频/音频或跨域重定向。
+- 图片最大 **12 MiB**；只识别 PNG/JPEG/GIF/WebP/AVIF/BMP，校验文件头；最多 5 个并行下载、内存缓存上限 32 MiB，成功图片缓存 10 分钟。断网、源站 403/404、源站非图片响应或核心未运行会导致加载失败。
+- 已知限制：外部 CSS 样式表中定义的背景图、Canvas 自行绘图、播放器/iframe、自定义 JavaScript 直接 `fetch` Catbox 的调用不在自动替换范围内；已签名图片 URL 超时后需要再次刷新或触发扫描。浏览器必须可以访问酒馆自身域名。
+
+### 诊断接口
+
+```bash
+# 不含管理员令牌的版本健康检查（酒馆2本机端口）
+curl -sS http://127.0.0.1:8001/api/plugins/proxy-dock/health
+# 应返回 {"ok":true,"name":"ProxyDock","version":"2.1.0"}
+```
+
+请不要把 `auth-token.txt`、机场订阅链接或聊天内的私密图片 URL 提交 GitHub。酒馆需要启用可信身份验证和 HTTPS；没有身份认证或仍关闭 CSRF 的公网部署不应暴露这类管理接口。签名图片链接本身也应视为短期访问凭据，不要转发给无关人员。
+
 ## 默认端口与安全边界
 
 - 内置 Mihomo 混合代理：`127.0.0.1:17890`
@@ -112,7 +144,7 @@ requestProxy:
 
 ## 更新状态与验证说明
 
-本压缩包中的代码已通过 Node.js 基础语法检查、功能模拟测试（认证、订阅 URL 验证、生成受限 Mihomo YAML、旧版代理状态），但**未在真实 Linux 服务器上实际运行 Mihomo**，也未用真实机场订阅验证下载、节点连接或 GPT API 请求。上述测试不是联网兼容性保证。
+本压缩包中的代码已通过 Node.js 基础语法检查、功能模拟测试（认证、订阅 URL 验证、生成受限 Mihomo YAML、旧版代理状态、Catbox 主机白名单、HMAC 签名、缓存、DOM 替换/还原），但**未在真实 Linux 服务器上实际运行 Mihomo**，也未用真实机场订阅验证下载、节点连接、Catbox 联网下载或 GPT API 请求。上述测试不是联网兼容性保证。
 
 参考文档：
 - [Clash Verge Rev 源码及其 GPL-3.0 许可](https://github.com/clash-verge-rev/clash-verge-rev)
