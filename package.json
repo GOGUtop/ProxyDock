@@ -1,0 +1,8 @@
+{
+  "name": "sillytavern-proxy-dock-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.cjs",
+  "description": "ProxyDock local network proxy profiles and Mihomo controller bridge"
+}

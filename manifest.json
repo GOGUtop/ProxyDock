@@ -1,0 +1,10 @@
+{
+  "display_name": "ProxyDock · 酒馆代理管理器",
+  "loading_order": 10,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Community custom build",
+  "version": "1.0.0"
+}
