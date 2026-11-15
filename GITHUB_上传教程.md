@@ -1,4 +1,4 @@
-# GitHub 更新到 ProxyDock Plus v2.0.0（保留原仓库）
+# GitHub 更新到 ProxyDock Plus v2.0.1（保留原仓库）
 
 目标仓库：`https://github.com/GOGUtop/ProxyDock`
 

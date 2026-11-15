@@ -1,4 +1,6 @@
-# ProxyDock Plus v2.0.0 — SillyTavern 订阅代理管理器
+> v2.0.1 修复：Node.js 22/24 订阅导入时 `Invalid IP address: undefined`（DNS lookup 回调格式）。
+
+# ProxyDock Plus v2.0.1 — SillyTavern 订阅代理管理器
 
 **目标：** 在 SillyTavern 酒馆网页内完成 Clash/Mihomo **YAML 订阅添加、更新、切换代理组和节点、延迟测试、代理模式切换，以及服务器端 Mihomo 代理核心启停**。本项目不是 Clash Verge Rev 的桌面程序，也没有复制 Clash Verge 的源码、界面或商标。
 

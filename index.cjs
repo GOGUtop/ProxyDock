@@ -1,5 +1,5 @@
 'use strict';
-/** ProxyDock Plus v2.0.0. Runs INSIDE the SillyTavern Node.js process. */
+/** ProxyDock Plus v2.0.1. Runs INSIDE the SillyTavern Node.js process. */
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -159,7 +159,7 @@ async function init(router) {
     load();
     if(state.enabled)apply();
     router.use(require('express').json({limit:'16kb'}));
-    router.get('/health',(_,res)=>res.json({ok:true,name:'ProxyDock',version:'2.0.0'}));
+    router.get('/health',(_,res)=>res.json({ok:true,name:'ProxyDock',version:'2.0.1'}));
     router.use(checkToken);
     router.get('/status',wrap((_,res)=>res.json(visible())));
     router.post('/profiles',wrap((req,res)=>{

@@ -28,6 +28,24 @@ assert.throws(()=>core.safeSubscriptionUrl('http://example.com/sub'));
 assert.throws(()=>core.safeSubscriptionUrl('https://127.0.0.1/'));
 assert.equal(core.safePublicIP('127.0.0.1'),false);
 assert.equal(core.safePublicIP('8.8.8.8'),true);
+// Regression: Node 22/24 pass lookup options {all:true}. Sending a string
+// instead of an array triggers ERR_INVALID_IP_ADDRESS ('undefined').
+const dns=require('node:dns');
+const originalDnsLookup=dns.lookup;
+try {
+    dns.lookup=(_host,_opts,cb)=>cb(null,[{address:'8.8.8.8',family:4},{address:'1.1.1.1',family:4}]);
+    core.publicOnlyLookup('example.com',{all:true},(err,result)=>{
+        assert.equal(err,null);
+        assert.deepEqual(result,[{address:'8.8.8.8',family:4},{address:'1.1.1.1',family:4}]);
+    });
+    core.publicOnlyLookup('example.com',{all:false},(err,address,family)=>{
+        assert.equal(err,null);assert.equal(address,'8.8.8.8');assert.equal(family,4);
+    });
+    dns.lookup=(_host,_opts,cb)=>cb(null,[{address:'8.8.8.8',family:4},{address:'127.0.0.1',family:4}]);
+    core.publicOnlyLookup('example.com',{all:true},(err)=>{
+        assert.match(err.message,/非公网地址/);
+    });
+} finally {dns.lookup=originalDnsLookup;}
 const config=core.parseSubscription(JSON.stringify({proxies:[{name:'HK1',type:'ss'}]}),'abc');
 const conf=JSON.parse(config.text);
 assert.equal(conf['mixed-port'],17890);

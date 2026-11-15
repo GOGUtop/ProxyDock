@@ -48,6 +48,19 @@ function safeSubscriptionUrl(value) {
     if (u.hostname.length > 253) throw new Error('订阅域名无效');
     return u.toString();
 }
+// Node 22+ may request lookup with {all:true}; in that case the callback MUST
+// receive an array of {address,family}, not the legacy single IP+family tuple.
+// Validate *every* DNS answer before allowing the request to connect.
+function publicOnlyLookup(host, options, cb) {
+    dns.lookup(host, {all:true}, (err, addresses) => {
+        if (err) return cb(err);
+        if (!addresses?.length || addresses.some(a => !safePublicIP(a.address)))
+            return cb(new Error('订阅 DNS 解析到了非公网地址，已拒绝'));
+        if (options?.all) return cb(null, addresses);
+        const first = addresses[0];
+        cb(null, first.address, first.family);
+    });
+}
 function fetchOnce(url, redirects = 0) {
     const safe = safeSubscriptionUrl(url);
     const u = new URL(safe);
@@ -56,11 +69,7 @@ function fetchOnce(url, redirects = 0) {
         const request = https.request({hostname:u.hostname, port:443, path:u.pathname+u.search,
             method:'GET', timeout:15000, agent:false,
             headers:{'User-Agent':'Clash-Verge/2.0 ProxyDock/2.0',Accept:'application/yaml,text/yaml,text/plain,application/octet-stream,*/*'},
-            lookup:(host, options, cb)=>dns.lookup(host,{all:true},(err,addresses)=>{
-                if(err)return cb(err);
-                if(!addresses?.length || addresses.some(a=>!safePublicIP(a.address)))return cb(new Error('订阅 DNS 解析到了非公网地址，已拒绝'));
-                const a=addresses[0];cb(null,a.address,a.family);
-            })
+            lookup:publicOnlyLookup
         }, res => {
             if ([301,302,303,307,308].includes(res.statusCode)) {
                 const target=res.headers.location;res.resume();
@@ -181,4 +190,4 @@ async function stop(){
 }
 function status() {return {running:!!child && child.exitCode===null && !child.killed, pid:child?.pid||null,error:childError,
     proxyPort:LOOPBACK_PROXY_PORT,controllerPort:LOOPBACK_API_PORT};}
-module.exports={fetchOnce,parseSubscription,safeSubscriptionUrl,safePublicIP,checkBinary,writeConfig,start,stop,status,CONFIG,LOOPBACK_PROXY_PORT,LOOPBACK_API_PORT};
+module.exports={fetchOnce,parseSubscription,safeSubscriptionUrl,safePublicIP,publicOnlyLookup,checkBinary,writeConfig,start,stop,status,CONFIG,LOOPBACK_PROXY_PORT,LOOPBACK_API_PORT};
